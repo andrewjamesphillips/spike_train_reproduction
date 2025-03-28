@@ -27,14 +27,14 @@ import sys
 sys.path.append('/Volumes/Lab/Users/ajphillips/greedy/src/')
 import sigmoid
 
-piece = '2024-10-02-2' # CHANGE ME
+piece = '2024-09-25-3' # CHANGE ME
 analysis_base = f"/Volumes/Stream/Analysis/RETINA/{piece}"
 pp_base = analysis_base
 gsort_base = analysis_base
 vstim_base = analysis_base
 espont_base = analysis_base
 pickle_path_base = "gsort_single_v2"
-label = "_2" # CHANGE ME
+label = "" # CHANGE ME
 
 
 frame_nos = np.arange(105) # CHANGE ME
@@ -48,10 +48,10 @@ for frame_no, response_no in tqdm(zip(frame_nos, response_nos), total=frame_nos.
 
     for estim_trial in tqdm(np.arange(estim_trials)):
 
-        estim = f"data008/frame_{frame_no}"
-        espont = "data008_from_data002"
-        vstim = "data005_from_data002"
-        wnoise = "data002"
+        estim = f"data007/frame_{frame_no}"
+        espont = "data007_from_data003"
+        vstim = "data005_from_data003"
+        wnoise = "data003"
         cell_types = ['ON parasol', 'OFF parasol']
 
         wnoise_path = os.path.join(analysis_base, wnoise)
@@ -60,10 +60,10 @@ for frame_no, response_no in tqdm(zip(frame_nos, response_nos), total=frame_nos.
         vstim_path = os.path.join(vstim_base, vstim)
         espont_path = os.path.join(espont_base, espont)
 
-        wn1 = 'data002'
-        estim1 = 'data003'
-        wn2 = 'data002'
-        estim2 = 'data010'
+        wn1 = 'data003'
+        estim1 = 'data004'
+        wn2 = 'data003'
+        estim2 = 'data009'
 
 
         # The dictionary and associated data is stored in this directory
@@ -107,7 +107,7 @@ for frame_no, response_no in tqdm(zip(frame_nos, response_nos), total=frame_nos.
         unique_times, count_times = np.unique(sef_of_interest[:,0], return_counts=True)
 
 
-        def flip(cell, pattern, amp, flip_prob=0.9, plot=False):
+        def flip(cell, pattern, amp, flip_prob=0.9, plot=False, suppress_warnings=False):
 
             gsort_path_base1 = os.path.join(gsort_base, "gsort", estim1)
             gsort_path_base2 = os.path.join(gsort_base, "gsort", estim2)
@@ -117,7 +117,10 @@ for frame_no, response_no in tqdm(zip(frame_nos, response_nos), total=frame_nos.
             pattern_nos = [int(p.split('p')[-1]) for p in patterns]
             
             if pattern not in pattern_nos:
-                raise Exception("Pattern not found in gsort_path_base1")
+                # raise Exception("Pattern not found in gsort_path_base1")
+                if not suppress_warnings:
+                    warnings.warn("Pattern not gsorted during single-electrode stimulation, can't disambiguate") # Note this will only show once if the issue occurs repeatedly
+                return False
 
             pattern = f"p{pattern}"
 
@@ -287,65 +290,96 @@ for frame_no, response_no in tqdm(zip(frame_nos, response_nos), total=frame_nos.
             elecs = elecs[~np.isin(elecs, skip_elecs)]
             return elecs[electrode-1]
 
+        def process_time_pattern(t):
+            """Process a single time pattern."""
+            local_initial_spikes = {}
+            local_initial_probabilities = {}
+            local_spikes = {}
+            local_probabilities = {}
+            local_off_target_counter = 0
+
+            # Set up nested dictionaries
+            local_initial_spikes[t] = {}
+            local_initial_probabilities[t] = {}
+            local_spikes[t] = {}
+            local_probabilities[t] = {}
+
+            # Identify all electrical stimuli delivered simultaneously at time t
+            stim = sef_of_interest[np.where(sef_of_interest[:, 0] == unique_times[t])[0], 1:]
+
+            target_cells = []
+            for s in stim:
+                # Find the row of selective_stimuli corresponding to each electrical stimulus
+                selective_stimulus = selective_stimuli[np.where((selective_stimuli[:, 0] == transform_to_519(s[0])) & (amps_to_indices(selective_stimuli[:, 2]) == s[1]))[0][0]]
+
+                # Look for electrical spike sorting results at the time-pattern for each targeted cell (only ever one movie per time-pattern)
+                c = int(selective_stimulus[1])
+                bs = boolean_spikes(gsort_path, pickle_path_base, c, f"p{t+1}", 0)
+
+                local_initial_spikes[t][c] = bs
+                local_initial_probabilities[t][c] = np.mean(bs)
+
+                # If the selective stimulus was pure (we expected the cell to spike with ~100% probability) and gsort returns ~0% probability,
+                # cross reference with the bookend single-electrode scan to decide how to disambiguate
+                # Assumes that multi-electrode stimulation does not significantly alter the single-electrode activation curve
+                # Ask Amrith about explanation for 0.1
+                if int(selective_stimulus[3]) and (np.mean(bs) < 0.2): 
+                    if flip(c, transform_to_519(s[0]), s[1], flip_prob=0.8, plot=False): 
+                        bs = [not b for b in bs]
+
+                local_spikes[t][c] = bs
+                local_probabilities[t][c] = np.mean(bs)
+
+                target_cells.append(c)
+
+            # Look for electrical spike sorting results at the time-pattern for each other gsorted cell (only ever one movie per time-pattern)
+            for c in sigmoid.find_activating_cells(gsort_path, f"{t+1}"):
+                if c in target_cells:
+                    continue
+
+                bs = boolean_spikes(gsort_path, pickle_path_base, c, f"p{t+1}", 0)
+
+                local_initial_spikes[t][c] = bs
+                local_initial_probabilities[t][c] = np.mean(bs)
+
+                # Perform disambiguation:
+                # We know that during the calibration scan, the non-target cell was not activated with the electrical stimulus
+                # If the bookend scan indicates that the non-target cell was activated with high probability, we assume the worst and flip the result
+                # Also assume the worst by trying to disambiguate with each electrical stimulus and taking the largest activation probability
+                if np.mean(bs) < 0.2:
+                    for s in stim:
+                        if flip(c, transform_to_519(s[0]), s[1], flip_prob=0.8, plot=False, suppress_warnings=True): 
+                            bs = [not b for b in bs]
+                            break
+
+                local_spikes[t][c] = bs
+                local_probabilities[t][c] = np.mean(bs)
+
+                if np.mean(bs) > 0.5:
+                    print(f"Off-target cell {c} activated at {np.mean(bs)} (expected {target_cells})")
+                    local_off_target_counter += 1
+
+            return local_initial_spikes, local_initial_probabilities, local_spikes, local_probabilities, local_off_target_counter
+
         if estim_trial == 0:
 
-            spikes = {}
-            probabilities = {}
-
+            # Use multiprocessing to parallelize the loop over t
             initial_spikes = {}
             initial_probabilities = {}
+            spikes = {}
+            probabilities = {}
+            off_target_counter = 0
 
+            with Pool() as pool:
+                for result in pool.imap(process_time_pattern, range(unique_times.shape[0])):
+                    local_initial_spikes, local_initial_probabilities, local_spikes, local_probabilities, local_off_target_counter = result
+                    initial_spikes.update(local_initial_spikes)
+                    initial_probabilities.update(local_initial_probabilities)
+                    spikes.update(local_spikes)
+                    probabilities.update(local_probabilities)
+                    off_target_counter += local_off_target_counter
 
-            for t in tqdm(range(unique_times.shape[0])):
-                # print(f"PATTERN {t+1}")
-
-                # Set up nested dictionaries
-                initial_spikes[t] = {}
-                initial_probabilities[t] = {}
-                spikes[t] = {}
-                probabilities[t] = {}
-
-                # Identify all electrical stimuli delivered simultaneously at time t
-                stim = sef_of_interest[np.where(sef_of_interest[:,0] == unique_times[t])[0],1:]
-
-                for s in stim:
-
-                    # Find the row of selective_stimuli corresponding to each electrical stimulus
-                    try:
-                        selective_stimulus = selective_stimuli[np.where((selective_stimuli[:,0] == transform_to_519(s[0])) & (amps_to_indices(selective_stimuli[:,2]) == s[1]))[0][0]]
-                    except:
-                        print(f"placeholder stimulus due to no spikes")
-                        continue
-                    # print(selective_stimulus)
-
-                    # Look for electrical spike sorting results at the time-pattern for each targeted cell (only ever one movie per time-pattern)
-                    c = int(selective_stimulus[1])
-                    # print(f"Cell {c}")
-                    bs = boolean_spikes(gsort_path, pickle_path_base, c, f"p{t+1}", 0)
-
-                    initial_spikes[t][c] = bs
-                    initial_probabilities[t][c] = np.mean(bs)
-
-                    # print(bs)
-                    # print(np.mean(bs))
-
-                    # If the selective stimulus was pure (we expected the cell to spike with ~100% probability) and gsort returns ~0% probability,
-                    # cross reference with the bookend single-electrode scan to decide how to disambiguate
-                    # Assumes that multi-electrode stimulation does not significantly alter the single-electrode activation curve
-                    # Ask Amrith about explanation for 0.1
-                    # _ = flip(c, s[0], s[1], flip_prob=0.9, plot=True)
-
-                    if int(selective_stimulus[3]) and (np.mean(bs) < 0.1): 
-                        if flip(c, transform_to_519(s[0]), s[1], flip_prob=0.9, plot=False): 
-                            bs = [not b for b in bs]
-
-                    spikes[t][c] = bs
-                    probabilities[t][c] = np.mean(bs)
-
-                #     print(bs)
-                #     print(np.mean(bs))
-
-                # print("=================================")
+            print(f"{off_target_counter / sum(count_stimuli) * 100:.1f}% of stimuli result in off-target activation")
 
 
         vstim_vcd = vl.load_vision_data(vstim_path,vstim,
@@ -385,6 +419,9 @@ for frame_no, response_no in tqdm(zip(frame_nos, response_nos), total=frame_nos.
 
         for t in range(unique_times.shape[0]):
             for c in spikes[t]:
+                # Only include selective cells of interest in results for now
+                if c not in selective_cells_of_interest:
+                    continue
                 if spikes[t][c][estim_trial]:
                     estim_response[np.where(selective_cells_of_interest == c)[0][0]].append(unique_times[t])
 
@@ -462,7 +499,7 @@ for frame_no, response_no in tqdm(zip(frame_nos, response_nos), total=frame_nos.
         plt.xlim(0, 500)
 
         # Save the plot
-        plt.savefig(f"/Volumes/Scratch/iko/Users/ajphillips/tmp/{piece}/figs{label}/frame_{frame_no}_trial_{estim_trial}.png")
+        plt.savefig(f"/Volumes/Lab/Users/ajphillips/iko/tmp/{piece}/figs{label}/frame_{frame_no}_trial_{estim_trial}.png")
 
         # Close the plot
         plt.close()
